@@ -2,9 +2,11 @@ package counter
 
 import (
 	"math"
+	"sync"
 )
 
 type lossyCounter struct {
+	mu             sync.RWMutex
 	errorTolerance float64
 	frequencies    []*entry
 	width          int
@@ -30,6 +32,8 @@ func NewLossyCounter(errorTolerance float64) *lossyCounter {
 
 // Count a countable and return the support for the countable.
 func (self *lossyCounter) Count(countable Countable) float64 {
+	self.mu.Lock()
+	defer self.mu.Unlock()
 	self.total++
 
 	count := 0
@@ -73,4 +77,20 @@ func (self *lossyCounter) prune() {
 			i++
 		}
 	}
+}
+
+func (self *lossyCounter) Stats() Stats {
+	self.mu.RLock()
+	defer self.mu.RUnlock()
+
+	l := len(self.frequencies)
+	dist := make([]int, l)
+	for i := range self.frequencies {
+		dist[i] = self.frequencies[i].count
+	}
+	stats := Stats{
+		UniqueFingerprints: l,
+		Distribution:       dist,
+	}
+	return stats
 }

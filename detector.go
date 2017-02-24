@@ -3,28 +3,32 @@ package morgoth
 import (
 	"errors"
 	"log"
+	"sync"
+	"sync/atomic"
 
 	"github.com/nathanielc/morgoth/counter"
 )
 
 type Detector struct {
+	mu             sync.RWMutex
 	consensus      float64
 	minSupport     float64
 	errorTolerance float64
 	counters       []fingerprinterCounter
-	Stats          DetectorStats
+	stats          DetectorStats
 }
 
 type DetectorStats struct {
 	WindowCount    uint64
 	DataPointCount uint64
 	AnomalousCount uint64
+	CounterStats   []counter.Stats
 }
 
 // Pair of fingerprinter and counter
 type fingerprinterCounter struct {
-	fingerprinter Fingerprinter
-	counter       counter.Counter
+	Fingerprinter
+	counter.Counter
 }
 
 // Create a new Lossy couting based detector
@@ -43,8 +47,8 @@ func NewDetector(consensus, minSupport, errorTolerance float64, fingerprinters [
 	counters := make([]fingerprinterCounter, len(fingerprinters))
 	for i, fingerprinter := range fingerprinters {
 		counters[i] = fingerprinterCounter{
-			fingerprinter,
-			counter.NewLossyCounter(errorTolerance),
+			Fingerprinter: fingerprinter,
+			Counter:       counter.NewLossyCounter(errorTolerance),
 		}
 	}
 	return &Detector{
@@ -57,20 +61,22 @@ func NewDetector(consensus, minSupport, errorTolerance float64, fingerprinters [
 
 // Determine if the window is anomalous
 func (self *Detector) IsAnomalous(window *Window) (bool, float64) {
-	self.Stats.WindowCount++
-	self.Stats.DataPointCount += uint64(len(window.Data))
+	self.mu.Lock()
+	defer self.mu.Unlock()
+	self.stats.WindowCount++
+	self.stats.DataPointCount += uint64(len(window.Data))
 
 	vote := 0.0
 	avgSupport := 0.0
 	n := 0.0
 	for _, fc := range self.counters {
-		fingerprint := fc.fingerprinter.Fingerprint(window.Copy())
-		support := fc.counter.Count(fingerprint)
+		fingerprint := fc.Fingerprint(window.Copy())
+		support := fc.Count(fingerprint)
 		anomalous := support <= self.minSupport
 		if anomalous {
 			vote++
 		}
-		log.Printf("D! %T anomalous? %v support: %f", fc.fingerprinter, anomalous, support)
+		log.Printf("D! %T anomalous? %v support: %f", fc.Fingerprinter, anomalous, support)
 
 		avgSupport = ((avgSupport * n) + support) / (n + 1)
 		n++
@@ -87,8 +93,23 @@ func (self *Detector) IsAnomalous(window *Window) (bool, float64) {
 	}
 
 	if anomalous {
-		self.Stats.AnomalousCount++
+		self.stats.AnomalousCount++
 	}
 
 	return anomalous, avgSupport
+}
+
+func (self *Detector) Stats() DetectorStats {
+	self.mu.RLock()
+	defer self.mu.RUnlock()
+	stats := DetectorStats{
+		WindowCount:    atomic.LoadUint64(&self.stats.WindowCount),
+		DataPointCount: atomic.LoadUint64(&self.stats.DataPointCount),
+		AnomalousCount: atomic.LoadUint64(&self.stats.AnomalousCount),
+	}
+	stats.CounterStats = make([]counter.Stats, len(self.counters))
+	for i, c := range self.counters {
+		stats.CounterStats[i] = c.Stats()
+	}
+	return stats
 }

@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/nathanielc/morgoth/fingerprinters/jsdiv"
 	"github.com/nathanielc/morgoth/fingerprinters/kstest"
 	"github.com/nathanielc/morgoth/fingerprinters/sigma"
+	"github.com/nathanielc/morgoth/stats"
 )
 
 const (
@@ -27,6 +29,8 @@ const (
 var socket = flag.String("socket", "", "Optional listen socket. If set then Morgoth will run in UDF socket mode, otherwise it will expect communication over STDIN/STDOUT.")
 var logLevel = flag.String("log-level", "info", "Default log level, one of debug, info, warn or error.")
 
+var statsServer *stats.Server
+
 func main() {
 	// Parse flags
 	flag.Parse()
@@ -37,9 +41,13 @@ func main() {
 		log.Fatal("E! ", err)
 	}
 
+	// Start stats server
+	statsServer = stats.NewServer()
+	go statsServer.Serve()
+
 	if *socket == "" {
 		a := agent.New(os.Stdin, os.Stdout)
-		h := newHandler(a)
+		h := newHandler("stdin", a)
 		a.Handler = h
 
 		log.Println("I! Starting agent using STDIN/STDOUT")
@@ -86,7 +94,7 @@ func (acc *accepter) Accept(conn net.Conn) {
 	count := acc.count
 	acc.count++
 	a := agent.New(conn, conn)
-	h := newHandler(a)
+	h := newHandler(strconv.Itoa(int(acc.count)), a)
 	a.Handler = h
 
 	log.Println("I! Starting agent for connection", count)
@@ -169,6 +177,9 @@ var fingerprinters = map[string]fingerprinterInfo{
 
 // A Kapacitor UDF Handler
 type Handler struct {
+	// name of remote connection
+	remote string
+
 	field          string
 	scoreField     string
 	minSupport     float64
@@ -184,8 +195,9 @@ type Handler struct {
 	fingerprinters []createFingerprinterFunc
 }
 
-func newHandler(a *agent.Agent) *Handler {
+func newHandler(remote string, a *agent.Agent) *Handler {
 	return &Handler{
+		remote:         remote,
 		agent:          a,
 		minSupport:     defaultMinSupport,
 		errorTolerance: defaultErrorTolerance,
@@ -328,6 +340,7 @@ func (h *Handler) EndBatch(b *udf.EndBatch) error {
 			h.newFingerprinters(),
 		)
 		h.detectors[b.Group] = detector
+		statsServer.SetDetector(fmt.Sprintf("conn=%s,group=%s", h.remote, b.Group), detector)
 	}
 	if anomalous, avgSupport := detector.IsAnomalous(h.currentWindow); anomalous {
 		// Send batch back to Kapacitor since it was anomalous
